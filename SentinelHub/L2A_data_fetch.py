@@ -80,7 +80,9 @@ def get_sentinel_image_10_bands(config , time_interval, bbox, size, plot=False):
         # Show the plot
         plt.show()
 
-    return final_img
+    # Return both the image and cloud mask
+    # clm is the cloud mask (0 = no cloud, >0 = cloud)
+    return final_img, clm
 
 def get_sentinel2_catalog_results(
     sh_config,
@@ -219,19 +221,32 @@ def fetch_sentinel2_images_from_results(
         time_interval = get_time_interval(timestamp)
         dates.append(time_interval)
 
-        # Create a shallow copy so original data_config is untouched
-        data_config_tmp = data_config.copy()
-        data_config_tmp["start_date"] = time_interval[0]
-        data_config_tmp["end_date"] = time_interval[1]
+        # Extract required parameters from data_config
+        bbox = data_config["bbox"]
+        size = (data_config["size"]["width"], data_config["size"]["height"])
 
-        img, cloud_mask = get_sentinel_image_10_bands(
-            sh_config=sh_config,
-            data_config=data_config_tmp,
-            plot=plot,
-            cloud_masking=cloud_masking
+        # Call function with correct parameters
+        final_img, cloud_mask_raw = get_sentinel_image_10_bands(
+            config=sh_config,
+            time_interval=time_interval,
+            bbox=bbox,
+            size=size,
+            plot=plot
         )
 
-        sentinel2_images.append(img)
+        # Convert cloud mask to boolean (0 = no cloud, >0 = cloud)
+        cloud_mask = (cloud_mask_raw > 0).astype(bool)
+        
+        # Apply cloud masking if requested
+        if cloud_masking:
+            # Apply cloud mask to the image (set cloud pixels to NaN)
+            masked_img = final_img.copy()
+            for i in range(10):
+                masked_img[:, :, i] = np.where(cloud_mask, np.nan, final_img[:, :, i])
+            sentinel2_images.append(masked_img)
+        else:
+            sentinel2_images.append(final_img)
+        
         cloud_masks.append(cloud_mask)
 
     # Log run time in IST
