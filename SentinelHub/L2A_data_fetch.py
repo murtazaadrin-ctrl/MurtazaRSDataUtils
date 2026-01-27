@@ -147,7 +147,29 @@ def get_sentinel2_catalog_results(
 
     return filtered_results
 
+def get_time_interval(timestamp):
+    """
+    Given a timestamp in ISO 8601 format, return a tuple with the time interval
+    1 hour before and 1 hour after the given time.
 
+    Parameters:
+        timestamp (str): The input timestamp in ISO 8601 format (e.g., '2024-03-15T05:10:52Z').
+
+    Returns:
+        tuple: A tuple containing the start and end time as ISO 8601 formatted strings.
+    """
+    # Convert the timestamp to a datetime object
+    time = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+
+    # Calculate 1 hour before and 1 hour after
+    time_before = time - timedelta(hours=1)
+    time_after = time + timedelta(hours=1)
+
+    # Convert back to ISO 8601 format (with 'Z' for UTC)
+    time_before_str = time_before.strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_after_str = time_after.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return (time_before_str, time_after_str)
 
 def generate_time_intervals(start_date: str, end_date: str, interval_days: int):
     start = datetime.strptime(start_date, '%Y-%m-%d')
