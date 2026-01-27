@@ -121,8 +121,9 @@ coords = (28.6139, 77.2090)  # Example: New Delhi
 date_range = ("2023-01-01", "2023-12-31")
 distances = (40, 40)  # 40km x 40km area
 resolution = 42  # meters per pixel
+max_cloud_cover = 20  # Maximum cloud cover percentage (for Sentinel-2 only)
 
-data_config = get_data_config(coords, date_range, distances, resolution)
+data_config = get_data_config(coords, date_range, distances, resolution, max_cloud_cover=max_cloud_cover)
 ```
 
 ### 2. Fetching Sentinel-2 Images
@@ -137,11 +138,10 @@ from MurtazaRSDataUtils import (
 # Create Sentinel Hub configuration
 config = create_config(client_id="your_id", client_secret="your_secret")
 
-# Search catalog
+# Search catalog (max_cloud_cover is now part of data_config)
 results = get_sentinel2_catalog_results(
     sh_config=config,
     data_config=data_config,
-    max_cloud_cover=20,
     min_time_diff_seconds=3600
 )
 

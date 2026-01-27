@@ -85,7 +85,6 @@ def get_sentinel_image_10_bands(config , time_interval, bbox, size, plot=False):
 def get_sentinel2_catalog_results(
     sh_config,
     data_config,
-    max_cloud_cover=20,
     min_time_diff_seconds=3600
 ):
     """
@@ -98,9 +97,7 @@ def get_sentinel2_catalog_results(
     sh_config : SHConfig
         Sentinel Hub configuration
     data_config : dict
-        Output of get_data_config
-    max_cloud_cover : int
-        Max allowed cloud cover percentage
+        Output of get_data_config (must include max_cloud_cover for S2)
     min_time_diff_seconds : int
         Minimum time difference between acquisitions (default = 1 hour)
 
@@ -115,6 +112,9 @@ def get_sentinel2_catalog_results(
         data_config["start_date"],
         data_config["end_date"]
     )
+    
+    # Get max_cloud_cover from data_config, default to 20 if not provided
+    max_cloud_cover = data_config.get("max_cloud_cover", 20)
 
     catalog = SentinelHubCatalog(config=sh_config)
 

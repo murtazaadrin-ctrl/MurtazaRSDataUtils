@@ -61,7 +61,7 @@ def get_polygon_coords(lon, lat, distancex, distancey):
     return [top_left, top_right, bottom_right, bottom_left, top_left]
 
 
-def get_data_config(coords, date_range, distances= (40,40), resolution = 42):
+def get_data_config(coords, date_range, distances= (40,40), resolution = 42, max_cloud_cover=None):
     # Example usage
     lat =   coords[0]
     lon =   coords[1]
@@ -83,7 +83,8 @@ def get_data_config(coords, date_range, distances= (40,40), resolution = 42):
 
     start_date = date_range[0]
     end_date = date_range[1]
-    return {
+    
+    config_dict = {
         "bbox": bbox,
         "size": {
             "width": size[0],
@@ -101,3 +102,27 @@ def get_data_config(coords, date_range, distances= (40,40), resolution = 42):
         "start_date": start_date,
         "end_date": end_date
     }
+    
+    # Only add max_cloud_cover if provided (for S2 functions)
+    if max_cloud_cover is not None:
+        config_dict["max_cloud_cover"] = max_cloud_cover
+    
+    return config_dict
+
+
+def print_config_info(data_config):
+    """
+    Print information about the data configuration in a formatted way.
+    
+    Parameters
+    ----------
+    data_config : dict
+        Output of get_data_config
+    """
+    print("\nData Config created successfully!")
+    print(f"BBox: {data_config['bbox']}")
+    print(f"Size: {data_config['size']}")
+    print(f"Resolution: {data_config['resolution']} meters")
+    print(f"Date Range: {data_config['start_date']} to {data_config['end_date']}")
+    if 'max_cloud_cover' in data_config:
+        print(f"Max Cloud Cover: {data_config['max_cloud_cover']}%")
