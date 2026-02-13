@@ -4,6 +4,7 @@
 Default behavior: return an in-memory dictionary with metadata and arrays:
 - mx_vnir: 42 m, 6 bands
 - hys: 191 m, 10 bands
+- clm: 42 m, 1 band
 
 Optional behavior: pass save_outputs=True to also write TIFF/YAML files.
 """
@@ -16,7 +17,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rasterio
@@ -55,6 +56,7 @@ def parse_args() -> argparse.Namespace:
         default=1500.0,
         help="Half side length (meters) for centered square AOI. Default: 1500 m",
     )
+    p.add_argument("--min-coverage-pct", type=float, default=50.0, help="Minimum AOI data coverage percent required.")
     p.add_argument("--out-dir", default=".", help="Output root directory")
     p.add_argument("--sh-client-id", default=None, help="Sentinel Hub OAuth client id")
     p.add_argument("--sh-client-secret", default=None, help="Sentinel Hub OAuth client secret")
@@ -95,34 +97,78 @@ def centered_bbox(lon: float, lat: float, half_size_m: float) -> BBox:
     return BBox((lon - d_lon, lat - d_lat, lon + d_lon, lat + d_lat), crs=CRS.WGS84)
 
 
-def get_latest_acquisition(bbox: BBox, start: str, end: str, config: SHConfig) -> Acquisition:
+def get_acquisitions_desc(bbox: BBox, start: str, end: str, config: SHConfig) -> List[Acquisition]:
     catalog = SentinelHubCatalog(config=config)
     search = catalog.search(
         collection=DataCollection.SENTINEL2_L1C,
         bbox=bbox,
         time=(start, end),
-        fields={
-            "include": ["properties.datetime", "properties.s2:mgrs_tile"],
-            "exclude": [],
-        },
+        fields={"include": ["properties.datetime", "properties.s2:mgrs_tile"], "exclude": []},
     )
 
-    latest_dt: Optional[datetime] = None
-    latest_tile = "TXXXXX"
-
+    acqs: List[Acquisition] = []
     for item in search:
-        dt_raw = item["properties"]["datetime"]
-        dt = parse_iso_utc(dt_raw)
+        dt = parse_iso_utc(item["properties"]["datetime"])
         tile = item["properties"].get("s2:mgrs_tile", "XXXXX")
         tile = tile if tile.startswith("T") else f"T{tile}"
-        if latest_dt is None or dt > latest_dt:
-            latest_dt = dt
-            latest_tile = tile
+        acqs.append(Acquisition(dt=dt, tile=tile))
 
-    if latest_dt is None:
-        raise RuntimeError("No Sentinel-2 L1C acquisition found for the given date range and center coordinate.")
+    acqs.sort(key=lambda x: x.dt, reverse=True)
+    return acqs
 
-    return Acquisition(dt=latest_dt, tile=latest_tile)
+
+def get_datamask_coverage_pct(bbox: BBox, acq_dt: datetime, config: SHConfig, resolution_m: float = 42) -> float:
+    evalscript = """
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["dataMask"] }],
+    output: { bands: 1, sampleType: "UINT8" }
+  };
+}
+function evaluatePixel(s) { return [s.dataMask]; }
+"""
+    time_window = (
+        (acq_dt - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        (acq_dt + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    req = SentinelHubRequest(
+        evalscript=evalscript,
+        input_data=[
+            SentinelHubRequest.input_data(
+                data_collection=DataCollection.SENTINEL2_L1C,
+                time_interval=time_window,
+                mosaicking_order="mostRecent",
+            )
+        ],
+        responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
+        bbox=bbox,
+        size=bbox_to_dimensions(bbox, resolution=resolution_m),
+        config=config,
+    )
+
+    arr = req.get_data(save_data=False)[0]
+    if arr.ndim == 3:
+        arr = arr[:, :, 0]
+    return float(np.mean(arr == 1) * 100.0)
+
+
+def get_latest_acquisition_with_min_coverage(
+    bbox: BBox,
+    start: str,
+    end: str,
+    config: SHConfig,
+    min_coverage_pct: float = 50.0,
+) -> Tuple[Acquisition, float]:
+    acqs = get_acquisitions_desc(bbox, start, end, config)
+
+    for acq in acqs:
+        cov = get_datamask_coverage_pct(bbox, acq.dt, config, resolution_m=42)
+        if cov >= min_coverage_pct:
+            return acq, cov
+
+    raise RuntimeError(f"No acquisition found with >= {min_coverage_pct:.1f}% AOI coverage.")
 
 
 def make_evalscript(bands: Sequence[str]) -> str:
@@ -133,7 +179,7 @@ def make_evalscript(bands: Sequence[str]) -> str:
 function setup() {{
   return {{
     input: [{{ bands: [{band_list}] }}],
-    output: {{ bands: {len(bands)}, sampleType: \"UINT16\" }}
+    output: {{ bands: {len(bands)}, sampleType: "FLOAT32" }}
   }};
 }}
 function evaluatePixel(sample) {{
@@ -228,6 +274,7 @@ def fetch_latest_g1a_centered(
     lat: float,
     lon: float,
     half_size_m: float = 1500.0,
+    min_coverage_pct: float = 50.0,
     out_dir: str = ".",
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
@@ -242,11 +289,12 @@ def fetch_latest_g1a_centered(
         raise ValueError("end must be greater than or equal to start")
 
     bbox = centered_bbox(lon, lat, half_size_m)
-    acq = get_latest_acquisition(
+    acq, coverage_pct = get_latest_acquisition_with_min_coverage(
         bbox=bbox,
         start=start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         end=end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         config=cfg,
+        min_coverage_pct=min_coverage_pct,
     )
 
     date_tag = acq.dt.strftime("%Y%m%dT%H%M%S")
@@ -254,7 +302,8 @@ def fetch_latest_g1a_centered(
 
     mx = fetch_stack(bbox=bbox, resolution_m=42, bands=MX_BANDS, acquisition_dt=acq.dt, config=cfg)
     hys = fetch_stack(bbox=bbox, resolution_m=191, bands=HYS_BANDS, acquisition_dt=acq.dt, config=cfg)
-    clm = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)
+    clm_raw = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)
+    clm = clm_raw if clm_raw.ndim == 2 else clm_raw[:, :, 0]
 
     mx_name = f"MX_VNIR_{date_tag}_{acq.tile}.tif"
     hys_name = f"HYS__{date_tag}_{acq.tile}.tif"
@@ -272,6 +321,7 @@ def fetch_latest_g1a_centered(
     return {
         "acquisition_datetime": acq.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tile": acq.tile,
+        "coverage_pct": coverage_pct,
         "bbox_wgs84": tuple(bbox),
         "mx_vnir": {
             "bands": list(MX_BANDS),
@@ -307,12 +357,14 @@ def main() -> None:
         lat=args.lat,
         lon=args.lon,
         half_size_m=args.half_size_m,
+        min_coverage_pct=args.min_coverage_pct,
         out_dir=args.out_dir,
         client_id=args.sh_client_id,
         client_secret=args.sh_client_secret,
         save_outputs=args.save_outputs,
     )
     print(f"Latest acquisition: {result['acquisition_datetime']} ({result['tile']})")
+    print(f"Coverage %: {result['coverage_pct']:.2f}")
     print(f"Saved outputs: {result['saved']}")
     if result["saved"]:
         print(f"Output directory: {result['paths']['output_dir']}")
