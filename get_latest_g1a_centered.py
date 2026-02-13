@@ -254,7 +254,7 @@ def fetch_latest_g1a_centered(
 
     mx = fetch_stack(bbox=bbox, resolution_m=42, bands=MX_BANDS, acquisition_dt=acq.dt, config=cfg)
     hys = fetch_stack(bbox=bbox, resolution_m=191, bands=HYS_BANDS, acquisition_dt=acq.dt, config=cfg)
-    clm = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)[:, :, 0]
+    clm = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)
 
     mx_name = f"MX_VNIR_{date_tag}_{acq.tile}.tif"
     hys_name = f"HYS__{date_tag}_{acq.tile}.tif"
