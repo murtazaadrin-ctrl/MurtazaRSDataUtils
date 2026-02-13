@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""Fetch latest Sentinel-2 L1C scene in a date range for a centered AOI.
+"""Fetch latest Sentinel-2 scene in a date range for a centered AOI.
 
 Default behavior: return an in-memory dictionary with metadata and arrays:
 - mx_vnir: 42 m, 6 bands
 - hys: 191 m, 10 bands
-- cloud_probability (CLP): 42 m, 1 band in [0, 1]
-- clm: thresholded cloud mask from CLP at 42 m
+- scl: 42 m scene classification map from Sentinel-2 L2A
+- clm: cloud mask from SCL (classes 8,9 only; thin cloud/cirrus 10 excluded)
+- snow: snow/ice mask from SCL (class 11)
 
 Optional behavior: pass save_outputs=True to also write TIFF/YAML files.
 """
@@ -36,7 +37,7 @@ from sentinelhub import (
 
 MX_BANDS: Sequence[str] = ("B02", "B03", "B04", "B06", "B07", "B8A")
 HYS_BANDS: Sequence[str] = ("B02", "B03", "B04", "B05", "B06", "B07", "B8A", "B09", "B11", "B12")
-CLP_BANDS: Sequence[str] = ("CLP",)
+SCL_BANDS: Sequence[str] = ("SCL",)
 
 
 @dataclass
@@ -58,12 +59,6 @@ def parse_args() -> argparse.Namespace:
         help="Half side length (meters) for centered square AOI. Default: 1500 m",
     )
     p.add_argument("--min-coverage-pct", type=float, default=50.0, help="Minimum AOI data coverage percent required.")
-    p.add_argument(
-        "--cloud-prob-threshold",
-        type=float,
-        default=0.4,
-        help="Threshold on CLP probability (0..1) to derive clm.",
-    )
     p.add_argument("--out-dir", default=".", help="Output root directory")
     p.add_argument("--sh-client-id", default=None, help="Sentinel Hub OAuth client id")
     p.add_argument("--sh-client-secret", default=None, help="Sentinel Hub OAuth client secret")
@@ -201,6 +196,7 @@ def fetch_stack(
     bands: Sequence[str],
     acquisition_dt: datetime,
     config: SHConfig,
+    data_collection: DataCollection = DataCollection.SENTINEL2_L1C,
 ) -> np.ndarray:
     time_window = (
         (acquisition_dt - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -211,7 +207,7 @@ def fetch_stack(
         evalscript=make_evalscript(bands),
         input_data=[
             SentinelHubRequest.input_data(
-                data_collection=DataCollection.SENTINEL2_L1C,
+                data_collection=data_collection,
                 time_interval=time_window,
                 mosaicking_order="mostRecent",
             )
@@ -288,7 +284,6 @@ def fetch_latest_g1a_centered(
     client_secret: Optional[str] = None,
     config: Optional[SHConfig] = None,
     save_outputs: bool = False,
-    cloud_prob_threshold: float = 0.4,
 ) -> Dict[str, Any]:
     cfg = config or build_config(client_id=client_id, client_secret=client_secret)
 
@@ -296,9 +291,6 @@ def fetch_latest_g1a_centered(
     end_dt = parse_iso_utc(end)
     if end_dt < start_dt:
         raise ValueError("end must be greater than or equal to start")
-
-    if not 0.0 <= cloud_prob_threshold <= 1.0:
-        raise ValueError("cloud_prob_threshold must be in [0, 1]")
 
     bbox = centered_bbox(lon, lat, half_size_m)
     acq, coverage_pct = get_latest_acquisition_with_min_coverage(
@@ -312,15 +304,39 @@ def fetch_latest_g1a_centered(
     date_tag = acq.dt.strftime("%Y%m%dT%H%M%S")
     output_dir = Path(out_dir) / f"G1A_MOCK_{date_tag}_{acq.tile}"
 
-    mx = fetch_stack(bbox=bbox, resolution_m=42, bands=MX_BANDS, acquisition_dt=acq.dt, config=cfg)
-    hys = fetch_stack(bbox=bbox, resolution_m=191, bands=HYS_BANDS, acquisition_dt=acq.dt, config=cfg)
+    mx = fetch_stack(
+        bbox=bbox,
+        resolution_m=42,
+        bands=MX_BANDS,
+        acquisition_dt=acq.dt,
+        config=cfg,
+        data_collection=DataCollection.SENTINEL2_L1C,
+    )
+    hys = fetch_stack(
+        bbox=bbox,
+        resolution_m=191,
+        bands=HYS_BANDS,
+        acquisition_dt=acq.dt,
+        config=cfg,
+        data_collection=DataCollection.SENTINEL2_L1C,
+    )
 
-    clp_raw = fetch_stack(bbox=bbox, resolution_m=42, bands=CLP_BANDS, acquisition_dt=acq.dt, config=cfg)
-    clp = clp_raw if clp_raw.ndim == 2 else clp_raw[:, :, 0]
-    clp = clp.astype(np.float32)
-    if np.nanmax(clp) > 1.0:
-        clp = clp / 255.0
-    clm = (clp >= cloud_prob_threshold).astype(np.uint8)
+    # SCL is available in L2A. We use it for cloud/snow masks.
+    scl_raw = fetch_stack(
+        bbox=bbox,
+        resolution_m=42,
+        bands=SCL_BANDS,
+        acquisition_dt=acq.dt,
+        config=cfg,
+        data_collection=DataCollection.SENTINEL2_L2A,
+    )
+    scl = scl_raw if scl_raw.ndim == 2 else scl_raw[:, :, 0]
+    scl = np.rint(scl).astype(np.uint8)
+
+    # Cloud mask from SCL without thin cloud/cirrus:
+    # include only class 8 (cloud medium prob) and 9 (cloud high prob).
+    clm = np.isin(scl, [8, 9]).astype(np.uint8)
+    snow = (scl == 11).astype(np.uint8)
 
     mx_name = f"MX_VNIR_{date_tag}_{acq.tile}.tif"
     hys_name = f"HYS__{date_tag}_{acq.tile}.tif"
@@ -350,16 +366,20 @@ def fetch_latest_g1a_centered(
             "resolution_m": 191,
             "array": hys,
         },
-        "cloud_probability": {
-            "bands": ["CLP"],
+        "scl": {
+            "bands": list(SCL_BANDS),
             "resolution_m": 42,
-            "array": clp,
+            "array": scl,
         },
         "clm": {
-            "bands": ["CLM_from_CLP"],
+            "bands": ["CLM_from_SCL_no_thin_cloud"],
             "resolution_m": 42,
-            "threshold": cloud_prob_threshold,
             "array": clm,
+        },
+        "snow": {
+            "bands": ["SNOW_from_SCL"],
+            "resolution_m": 42,
+            "array": snow,
         },
         "saved": save_outputs,
         "paths": {
@@ -385,11 +405,11 @@ def main() -> None:
         client_id=args.sh_client_id,
         client_secret=args.sh_client_secret,
         save_outputs=args.save_outputs,
-        cloud_prob_threshold=args.cloud_prob_threshold,
     )
     print(f"Latest acquisition: {result['acquisition_datetime']} ({result['tile']})")
     print(f"Coverage %: {result['coverage_pct']:.2f}")
-    print(f"CLP threshold: {result['clm']['threshold']}")
+    print(f"Cloud % (SCL classes 8,9): {float(np.mean(result['clm']['array']) * 100):.2f}")
+    print(f"Snow % (SCL class 11): {float(np.mean(result['snow']['array']) * 100):.2f}")
     print(f"Saved outputs: {result['saved']}")
     if result["saved"]:
         print(f"Output directory: {result['paths']['output_dir']}")
