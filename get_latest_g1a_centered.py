@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import rasterio
@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", default=".", help="Output root directory")
     p.add_argument("--sh-client-id", default=None, help="Sentinel Hub OAuth client id")
     p.add_argument("--sh-client-secret", default=None, help="Sentinel Hub OAuth client secret")
+    p.add_argument(
+        "--save-outputs",
+        action="store_true",
+        help="If set, save TIFF/YAML outputs to disk; otherwise return only in-memory dictionary.",
+    )
     return p.parse_args()
 
 
@@ -236,7 +241,8 @@ def fetch_latest_g1a_centered(
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
     config: Optional[SHConfig] = None,
-) -> FetchResult:
+    save_outputs: bool = False,
+) -> Dict[str, Any]:
     cfg = config or build_config(client_id=client_id, client_secret=client_secret)
 
     start_dt = parse_iso_utc(start)
@@ -265,20 +271,35 @@ def fetch_latest_g1a_centered(
     mx_yaml_path = output_dir / f"dataset_g1a_mx_vnir_{date_tag}_{acq.tile}.yaml"
     hys_yaml_path = output_dir / f"dataset_g1a_hys_{date_tag}_{acq.tile}.yaml"
 
-    write_tif(mx_path, bbox, mx)
-    write_tif(hys_path, bbox, hys)
-    write_yaml(mx_yaml_path, "g1a_mx_vnir", date_tag, acq.tile, mx_name, acq.dt, "MX")
-    write_yaml(hys_yaml_path, "g1a_hys", date_tag, acq.tile, hys_name, acq.dt, "HYS")
+    if save_outputs:
+        write_tif(mx_path, bbox, mx)
+        write_tif(hys_path, bbox, hys)
+        write_yaml(mx_yaml_path, "g1a_mx_vnir", date_tag, acq.tile, mx_name, acq.dt, "MX")
+        write_yaml(hys_yaml_path, "g1a_hys", date_tag, acq.tile, hys_name, acq.dt, "HYS")
 
-    return FetchResult(
-        acquisition_datetime=acq.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        tile=acq.tile,
-        output_dir=output_dir,
-        mx_path=mx_path,
-        hys_path=hys_path,
-        mx_yaml_path=mx_yaml_path,
-        hys_yaml_path=hys_yaml_path,
-    )
+    return {
+        "acquisition_datetime": acq.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "tile": acq.tile,
+        "bbox_wgs84": tuple(bbox),
+        "mx_vnir": {
+            "bands": list(MX_BANDS),
+            "resolution_m": 42,
+            "array": mx,
+        },
+        "hys": {
+            "bands": list(HYS_BANDS),
+            "resolution_m": 191,
+            "array": hys,
+        },
+        "saved": save_outputs,
+        "paths": {
+            "output_dir": str(output_dir),
+            "mx_path": str(mx_path),
+            "hys_path": str(hys_path),
+            "mx_yaml_path": str(mx_yaml_path),
+            "hys_yaml_path": str(hys_yaml_path),
+        },
+    }
 
 
 def main() -> None:
@@ -292,11 +313,14 @@ def main() -> None:
         out_dir=args.out_dir,
         client_id=args.sh_client_id,
         client_secret=args.sh_client_secret,
+        save_outputs=args.save_outputs,
     )
-    print(f"Latest acquisition: {result.acquisition_datetime} ({result.tile})")
-    print(f"Output directory: {result.output_dir}")
-    print(f"MX_VNIR: {result.mx_path}")
-    print(f"HYS: {result.hys_path}")
+    print(f"Latest acquisition: {result['acquisition_datetime']} ({result['tile']})")
+    print(f"Saved outputs: {result['saved']}")
+    if result["saved"]:
+        print(f"Output directory: {result['paths']['output_dir']}")
+        print(f"MX_VNIR: {result['paths']['mx_path']}")
+        print(f"HYS: {result['paths']['hys_path']}")
 
 
 if __name__ == "__main__":
