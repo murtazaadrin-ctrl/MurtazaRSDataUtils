@@ -4,7 +4,8 @@
 Default behavior: return an in-memory dictionary with metadata and arrays:
 - mx_vnir: 42 m, 6 bands
 - hys: 191 m, 10 bands
-- clm: 42 m, 1 band
+- cloud_probability (CLP): 42 m, 1 band in [0, 1]
+- clm: thresholded cloud mask from CLP at 42 m
 
 Optional behavior: pass save_outputs=True to also write TIFF/YAML files.
 """
@@ -35,7 +36,7 @@ from sentinelhub import (
 
 MX_BANDS: Sequence[str] = ("B02", "B03", "B04", "B06", "B07", "B8A")
 HYS_BANDS: Sequence[str] = ("B02", "B03", "B04", "B05", "B06", "B07", "B8A", "B09", "B11", "B12")
-CLM_BANDS: Sequence[str] = ("CLM",)
+CLP_BANDS: Sequence[str] = ("CLP",)
 
 
 @dataclass
@@ -45,7 +46,7 @@ class Acquisition:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Fetch latest mx_vnir + hys mock outputs around a center coordinate")
+    p = argparse.ArgumentParser(description="Fetch latest mx_vnir + hys around a center coordinate")
     p.add_argument("--start", required=True, help="Start date/time, e.g. 2025-11-01 or 2025-11-01T00:00:00Z")
     p.add_argument("--end", required=True, help="End date/time, e.g. 2026-02-01 or 2026-02-01T23:59:59Z")
     p.add_argument("--lat", type=float, required=True, help="Center latitude in WGS84")
@@ -57,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         help="Half side length (meters) for centered square AOI. Default: 1500 m",
     )
     p.add_argument("--min-coverage-pct", type=float, default=50.0, help="Minimum AOI data coverage percent required.")
+    p.add_argument(
+        "--cloud-prob-threshold",
+        type=float,
+        default=0.4,
+        help="Threshold on CLP probability (0..1) to derive clm.",
+    )
     p.add_argument("--out-dir", default=".", help="Output root directory")
     p.add_argument("--sh-client-id", default=None, help="Sentinel Hub OAuth client id")
     p.add_argument("--sh-client-secret", default=None, help="Sentinel Hub OAuth client secret")
@@ -122,8 +129,8 @@ def get_datamask_coverage_pct(bbox: BBox, acq_dt: datetime, config: SHConfig, re
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["dataMask"] }],
-    output: { bands: 1, sampleType: "UINT8" }
+    input: [{ bands: [\"dataMask\"] }],
+    output: { bands: 1, sampleType: \"UINT8\" }
   };
 }
 function evaluatePixel(s) { return [s.dataMask]; }
@@ -179,7 +186,7 @@ def make_evalscript(bands: Sequence[str]) -> str:
 function setup() {{
   return {{
     input: [{{ bands: [{band_list}] }}],
-    output: {{ bands: {len(bands)}, sampleType: "FLOAT32" }}
+    output: {{ bands: {len(bands)}, sampleType: \"FLOAT32\" }}
   }};
 }}
 function evaluatePixel(sample) {{
@@ -214,6 +221,7 @@ def fetch_stack(
         size=bbox_to_dimensions(bbox, resolution=resolution_m),
         config=config,
     )
+
     data = req.get_data(save_data=False)
     if not data:
         raise RuntimeError("No raster returned from Sentinel Hub request.")
@@ -280,6 +288,7 @@ def fetch_latest_g1a_centered(
     client_secret: Optional[str] = None,
     config: Optional[SHConfig] = None,
     save_outputs: bool = False,
+    cloud_prob_threshold: float = 0.4,
 ) -> Dict[str, Any]:
     cfg = config or build_config(client_id=client_id, client_secret=client_secret)
 
@@ -287,6 +296,9 @@ def fetch_latest_g1a_centered(
     end_dt = parse_iso_utc(end)
     if end_dt < start_dt:
         raise ValueError("end must be greater than or equal to start")
+
+    if not 0.0 <= cloud_prob_threshold <= 1.0:
+        raise ValueError("cloud_prob_threshold must be in [0, 1]")
 
     bbox = centered_bbox(lon, lat, half_size_m)
     acq, coverage_pct = get_latest_acquisition_with_min_coverage(
@@ -302,8 +314,13 @@ def fetch_latest_g1a_centered(
 
     mx = fetch_stack(bbox=bbox, resolution_m=42, bands=MX_BANDS, acquisition_dt=acq.dt, config=cfg)
     hys = fetch_stack(bbox=bbox, resolution_m=191, bands=HYS_BANDS, acquisition_dt=acq.dt, config=cfg)
-    clm_raw = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)
-    clm = clm_raw if clm_raw.ndim == 2 else clm_raw[:, :, 0]
+
+    clp_raw = fetch_stack(bbox=bbox, resolution_m=42, bands=CLP_BANDS, acquisition_dt=acq.dt, config=cfg)
+    clp = clp_raw if clp_raw.ndim == 2 else clp_raw[:, :, 0]
+    clp = clp.astype(np.float32)
+    if np.nanmax(clp) > 1.0:
+        clp = clp / 255.0
+    clm = (clp >= cloud_prob_threshold).astype(np.uint8)
 
     mx_name = f"MX_VNIR_{date_tag}_{acq.tile}.tif"
     hys_name = f"HYS__{date_tag}_{acq.tile}.tif"
@@ -333,9 +350,15 @@ def fetch_latest_g1a_centered(
             "resolution_m": 191,
             "array": hys,
         },
-        "clm": {
-            "bands": list(CLM_BANDS),
+        "cloud_probability": {
+            "bands": ["CLP"],
             "resolution_m": 42,
+            "array": clp,
+        },
+        "clm": {
+            "bands": ["CLM_from_CLP"],
+            "resolution_m": 42,
+            "threshold": cloud_prob_threshold,
             "array": clm,
         },
         "saved": save_outputs,
@@ -362,9 +385,11 @@ def main() -> None:
         client_id=args.sh_client_id,
         client_secret=args.sh_client_secret,
         save_outputs=args.save_outputs,
+        cloud_prob_threshold=args.cloud_prob_threshold,
     )
     print(f"Latest acquisition: {result['acquisition_datetime']} ({result['tile']})")
     print(f"Coverage %: {result['coverage_pct']:.2f}")
+    print(f"CLP threshold: {result['clm']['threshold']}")
     print(f"Saved outputs: {result['saved']}")
     if result["saved"]:
         print(f"Output directory: {result['paths']['output_dir']}")
