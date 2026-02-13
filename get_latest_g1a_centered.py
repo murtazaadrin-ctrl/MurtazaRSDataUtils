@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Fetch latest Sentinel-2 L1C scene in a date range for a centered AOI and export G1A-mock products.
+"""Fetch latest Sentinel-2 L1C scene in a date range for a centered AOI.
 
-Outputs:
-- G1A_MOCK_<DATE>_<TILE>/MX_VNIR_<DATE>_<TILE>.tif  (42 m, 6 bands)
-- G1A_MOCK_<DATE>_<TILE>/HYS__<DATE>_<TILE>.tif     (191 m, 10 bands)
-- Matching EO3-like YAML descriptors for g1a_mx_vnir and g1a_hys
+Default behavior: return an in-memory dictionary with metadata and arrays:
+- mx_vnir: 42 m, 6 bands
+- hys: 191 m, 10 bands
+
+Optional behavior: pass save_outputs=True to also write TIFF/YAML files.
 """
 
 from __future__ import annotations
@@ -33,23 +34,13 @@ from sentinelhub import (
 
 MX_BANDS: Sequence[str] = ("B02", "B03", "B04", "B06", "B07", "B8A")
 HYS_BANDS: Sequence[str] = ("B02", "B03", "B04", "B05", "B06", "B07", "B8A", "B09", "B11", "B12")
+CLM_BANDS: Sequence[str] = ("CLM",)
 
 
 @dataclass
 class Acquisition:
     dt: datetime
     tile: str
-
-
-@dataclass
-class FetchResult:
-    acquisition_datetime: str
-    tile: str
-    output_dir: Path
-    mx_path: Path
-    hys_path: Path
-    mx_yaml_path: Path
-    hys_yaml_path: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -263,6 +254,7 @@ def fetch_latest_g1a_centered(
 
     mx = fetch_stack(bbox=bbox, resolution_m=42, bands=MX_BANDS, acquisition_dt=acq.dt, config=cfg)
     hys = fetch_stack(bbox=bbox, resolution_m=191, bands=HYS_BANDS, acquisition_dt=acq.dt, config=cfg)
+    clm = fetch_stack(bbox=bbox, resolution_m=42, bands=CLM_BANDS, acquisition_dt=acq.dt, config=cfg)[:, :, 0]
 
     mx_name = f"MX_VNIR_{date_tag}_{acq.tile}.tif"
     hys_name = f"HYS__{date_tag}_{acq.tile}.tif"
@@ -290,6 +282,11 @@ def fetch_latest_g1a_centered(
             "bands": list(HYS_BANDS),
             "resolution_m": 191,
             "array": hys,
+        },
+        "clm": {
+            "bands": list(CLM_BANDS),
+            "resolution_m": 42,
+            "array": clm,
         },
         "saved": save_outputs,
         "paths": {
